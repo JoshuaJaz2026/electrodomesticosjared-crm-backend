@@ -1,0 +1,752 @@
+CONFIG/SETTINGS:
+
+import os
+import dj_database_url
+
+# ... (Configuraciones de siempre)
+
+DEBUG = 'RENDER' not in os.environ
+
+ALLOWED_HOSTS = []
+render_external_hostname = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+if render_external_hostname:
+    ALLOWED_HOSTS.append(render_external_hostname)
+
+# Configuración de Base de Datos para Render
+DATABASES = {
+    'default': dj_database_url.config(
+        default='sqlite:///db.sqlite3',
+        conn_max_age=600
+    )
+}
+
+inventario/views.py
+
+from django.shortcuts import render
+from django.contrib.auth.decorators import login_required
+from django.contrib.auth.views import LoginView
+from django.urls import reverse_lazy  # <-- Importante para redirecciones seguras
+from .models import Electrodomestico, Plataforma 
+
+# 1. El Pre-Login (Portal público)
+def selector_plataformas(request):
+    plataformas = [
+        {"nombre": "Mercado Libre", "icono": "fas fa-handshake", "color": "#F1C40F"},
+        {"nombre": "Mercado Libre - Junior", "icono": "fas fa-seedling", "color": "#F39C12"},
+        {"nombre": "Creditienda", "icono": "fas fa-credit-card", "color": "#E74C3C"},
+        {"nombre": "Falabella", "icono": "fas fa-store", "color": "#2ECC71"},
+        {"nombre": "Intercorp", "icono": "fas fa-building", "color": "#2980B9"},
+        {"nombre": "Venta Libre", "icono": "fas fa-tags", "color": "#9B59B6"},
+        {"nombre": "Tik tok", "icono": "fab fa-tiktok", "color": "#2C3E50"},
+        {"nombre": "Web", "icono": "fas fa-globe", "color": "#3498DB"}
+    ]
+    return render(request, 'inventario/selector.html', {'plataformas': plataformas})
+
+# ---------------------------------------------------------
+# 2. VISTAS DEL SISTEMA (Post-Login)
+# ---------------------------------------------------------
+
+@login_required
+def inicio(request):
+    canal = request.session.get('canal_activo', 'Web')
+    # <-- AHORA APUNTA A DASHBOARD.HTML PARA VER LA BIENVENIDA -->
+    return render(request, 'inventario/dashboard_global.html', {'canal': canal})
+
+@login_required
+def inventario_magazzino(request):
+    productos = Electrodomestico.objects.all() 
+    canal = request.session.get('canal_activo', 'Web')
+    return render(request, 'inventario/inventario_lista.html', {
+        'productos': productos, 
+        'canal': canal,
+        'nombre_almacen': 'MAGAZZINO'
+    })
+
+@login_required
+def inventario_percheron(request):
+    productos = Electrodomestico.objects.all() 
+    canal = request.session.get('canal_activo', 'Web')
+    return render(request, 'inventario/inventario_lista.html', {
+        'productos': productos, 
+        'canal': canal,
+        'nombre_almacen': 'PERCHERON'
+    })
+
+@login_required
+def reporte_ventas(request):
+    canal = request.session.get('canal_activo', 'Web')
+    return render(request, 'inventario/reportes_ventas.html', {'canal': canal})
+
+@login_required
+def simulador_costos(request):
+    canal = request.session.get('canal_activo', 'Web')
+    return render(request, 'inventario/simulador_costos.html', {'canal': canal})
+
+@login_required
+def pantalla_carga(request):
+    canal = request.session.get('canal_activo', 'Web')
+    return render(request, 'inventario/loading.html', {'canal': canal})
+
+@login_required
+def magazzino_consulta_rapida(request):
+    canal = request.session.get('canal_activo', 'Web')
+    productos = Electrodomestico.objects.all()
+    return render(request, 'inventario/magazzino_consulta_rapida.html', {
+        'productos': productos,
+        'canal': canal,
+        'titulo': 'Consulta Rápida - MAGAZZINO'
+    })
+
+@login_required
+def magazzino_salidas(request):
+    canal = request.session.get('canal_activo', 'Web')
+    productos = Electrodomestico.objects.all() 
+    return render(request, 'inventario/magazzino_salidas.html', {
+        'canal': canal,
+        'productos': productos
+    })
+
+@login_required
+def magazzino_buscador(request):
+    canal = request.session.get('canal_activo', 'Web')
+    query = request.GET.get('modelo', '')
+    if query:
+        resultados = Electrodomestico.objects.filter(modelo__icontains=query)
+    else:
+        resultados = None
+
+    return render(request, 'inventario/magazzino_buscador.html', {
+        'canal': canal,
+        'resultados': resultados,
+        'query': query
+    })
+
+@login_required
+def magazzino_ingresos(request):
+    canal = request.session.get('canal_activo', 'Web')
+    productos = Electrodomestico.objects.all().order_by('-id') 
+    return render(request, 'inventario/magazzino_ingresos.html', {
+        'canal': canal,
+        'productos': productos
+    })
+
+@login_required
+def magazzino_costos(request):
+    canal = request.session.get('canal_activo', 'Web')
+    tipo_cambio = request.GET.get('tipo_cambio', '3.80')
+    productos = Electrodomestico.objects.all()
+    
+    return render(request, 'inventario/magazzino_costos.html', {
+        'canal': canal,
+        'productos': productos,
+        'tipo_cambio': tipo_cambio
+    })
+
+# ---------------------------------------------------------
+# 3. EL CEREBRO: Login Camaleónico
+# ---------------------------------------------------------
+class LoginCamaleonicoView(LoginView):
+    template_name = 'inventario/login.html'
+    
+    estilos = {
+        "Mercado Libre": {"color": "#F1C40F", "icono": "fa-handshake"},
+        "Mercado Libre - Junior": {"color": "#F39C12", "icono": "fa-seedling"},
+        "Creditienda": {"color": "#E74C3C", "icono": "fa-credit-card"},
+        "Falabella": {"color": "#2ECC71", "icono": "fa-store"},
+        "Intercorp": {"color": "#2980B9", "icono": "fa-building"},
+        "Venta Libre": {"color": "#9B59B6", "icono": "fa-tags"},
+        "Tik tok": {"color": "#2C3E50", "icono": "fa-tiktok"},
+        "Web": {"color": "#3498DB", "icono": "fa-globe"}
+    }
+
+    # Usamos reverse_lazy para evitar errores de carga prematura
+    def get_success_url(self):
+        return reverse_lazy('pantalla_carga') 
+    
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        canal = self.request.GET.get('canal', 'Web') 
+        tema_actual = self.estilos.get(canal, self.estilos["Web"])
+        
+        # Estas variables ahora coinciden exactamente con lo que recibe tu login.html
+        context['plataforma'] = canal
+        context['color'] = tema_actual['color']
+        
+        icon_prefix = "fab" if "tiktok" in tema_actual['icono'] else "fas"
+        context['icono'] = f"{icon_prefix} {tema_actual['icono']}"
+        return context
+
+    def form_valid(self, form):
+        usuario = form.get_user()
+        canal_solicitado = self.request.GET.get('canal', 'Web')
+
+        if not usuario.is_superuser:
+            if hasattr(usuario, 'perfil'):
+                permitido = usuario.perfil.plataformas.filter(nombre=canal_solicitado).exists()
+                if not permitido:
+                    form.add_error(None, f"Acceso denegado: Tu usuario no tiene permiso para {canal_solicitado}.")
+                    return self.form_invalid(form)
+            else:
+                form.add_error(None, "Usuario sin perfil asignado.")
+                return self.form_invalid(form)
+
+        tema = self.estilos.get(canal_solicitado, self.estilos["Web"])
+        self.request.session['canal_activo'] = canal_solicitado
+        self.request.session['color_actual'] = tema['color']
+        
+        icon_prefix = "fab" if "tiktok" in tema['icono'] else "fas"
+        self.request.session['icono_actual'] = f"{icon_prefix} {tema['icono']}"
+        
+        return super().form_valid(form)
+
+
+inventario/urls.py
+
+from django.urls import path
+from . import views
+from django.contrib.auth import views as auth_views
+
+urlpatterns = [
+    # --- SISTEMA BASE ---
+    path('', views.selector_plataformas, name='selector'),
+    path('login/', views.LoginCamaleonicoView.as_view(), name='login'),
+    path('logout/', auth_views.LogoutView.as_view(), name='logout'),
+    path('loading/', views.pantalla_carga, name='pantalla_carga'),
+    path('inicio/', views.inicio, name='inicio'),
+    
+    # --- INVENTARIOS GLOBALES ---
+    path('inventario/magazzino/', views.inventario_magazzino, name='inv_magazzino'),
+    path('inventario/percheron/', views.inventario_percheron, name='inv_percheron'),
+    
+    # --- MAGAZZINO: SUB-FUNCIONES ---
+    path('magazzino/consulta/', views.magazzino_consulta_rapida, name='magazzino_consulta'),
+    path('magazzino/salidas/', views.magazzino_salidas, name='magazzino_salidas'),
+    path('magazzino/buscador/', views.magazzino_buscador, name='magazzino_buscador'),
+    path('magazzino/ingresos/', views.magazzino_ingresos, name='magazzino_ingresos'),
+    path('magazzino/costos/', views.magazzino_costos, name='magazzino_costos'),
+    # Nota: Registros lo podemos linkear a Ver Todo por ahora o crear su vista luego
+    
+    # --- OPERACIONES POR PLATAFORMA ---
+    path('reportes/', views.reporte_ventas, name='reporte_ventas'),
+    path('simulador/', views.simulador_costos, name='simulador_costos'),
+]
+
+
+inventario/templates/inventario/login.html
+
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- El título de la pestaña cambia automáticamente -->
+    <title>Acceso - {{ nombre_canal }}</title>
+    
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        :root {
+            /* AQUÍ ESTÁ LA MAGIA: El color llega desde Python y cambia toda la página */
+            --brand-color: {{ color_principal }};
+            --bg-main: #f8fafc;
+            --text-main: #0f172a;
+            --text-muted: #64748b;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }
+        
+        body { 
+            background-color: var(--bg-main); 
+            /* El fondo se ilumina sutilmente con el color de la plataforma */
+            background-image: radial-gradient(circle at top, color-mix(in srgb, var(--brand-color) 12%, transparent) 0%, transparent 50%);
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh; 
+        }
+        
+        .login-container {
+            background-color: white;
+            padding: 40px;
+            border-radius: 16px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.05), 0 20px 48px rgba(0,0,0,0.05);
+            width: 100%;
+            max-width: 420px;
+            /* La línea de arriba cambia de color */
+            border-top: 5px solid var(--brand-color); 
+        }
+        
+        .login-header { text-align: center; margin-bottom: 30px; }
+        
+        .icon-wrapper {
+            width: 64px;
+            height: 64px;
+            border-radius: 16px;
+            background-color: color-mix(in srgb, var(--brand-color) 12%, transparent);
+            color: var(--brand-color);
+            font-size: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px auto;
+        }
+
+        .login-header h2 { color: var(--text-main); font-size: 26px; font-weight: 700; margin-bottom: 8px; }
+        .login-header p { color: var(--text-muted); font-size: 15px; }
+        
+        .form-group { margin-bottom: 22px; }
+        .form-group label { display: block; color: #334155; font-weight: 600; margin-bottom: 8px; font-size: 14px; }
+        .form-group input { 
+            width: 100%; 
+            padding: 12px 16px; 
+            border: 1px solid #cbd5e1; 
+            border-radius: 8px; 
+            font-size: 15px; 
+            transition: all 0.3s;
+        }
+        
+        /* El borde al hacer clic en escribir también cambia de color */
+        .form-group input:focus { 
+            border-color: var(--brand-color); 
+            box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-color) 20%, transparent);
+            outline: none; 
+        }
+        
+        .btn-submit {
+            width: 100%;
+            background-color: var(--brand-color);
+            color: white;
+            padding: 14px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .btn-submit:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px color-mix(in srgb, var(--brand-color) 30%, transparent);
+        }
+        
+        .error-message {
+            background-color: #fee2e2;
+            color: #b91c1c;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            text-align: center;
+            font-weight: 500;
+        }
+
+        .back-link {
+            display: block;
+            text-align: center;
+            margin-top: 24px;
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+            transition: color 0.3s;
+        }
+        .back-link:hover { color: var(--brand-color); }
+    </style>
+</head>
+<body>
+
+    <div class="login-container">
+        <div class="login-header">
+            <!-- Cargamos el ícono dinámico que mandó Python -->
+            <div class="icon-wrapper">
+                <i class="{{ icono_canal }}"></i>
+            </div>
+            <!-- Cargamos el nombre dinámico -->
+            <h2>Ingreso a {{ nombre_canal }}</h2>
+            <p>Bienvenido. Ingrese sus credenciales de acceso.</p>
+        </div>
+
+        {% if form.errors %}
+            <div class="error-message">
+                <i class="fas fa-exclamation-circle"></i> Usuario o contraseña incorrectos.
+            </div>
+        {% endif %}
+
+        <!-- MUY IMPORTANTE: Mandamos el canal en la url al enviar el formulario para no perder el color si hay un error -->
+        <form method="post" action="{% url 'login' %}?canal={{ nombre_canal|urlencode }}">
+            {% csrf_token %}
+            
+            <div class="form-group">
+                <label for="id_username">Usuario</label>
+                <input type="text" name="username" autofocus autocapitalize="none" autocomplete="username" maxlength="150" required id="id_username">
+            </div>
+            
+            <div class="form-group">
+                <label for="id_password">Contraseña</label>
+                <input type="password" name="password" autocomplete="current-password" required id="id_password">
+            </div>
+            
+            <button type="submit" class="btn-submit">Ingresar al Sistema</button>
+        </form>
+
+        <!-- Botón para regresar si te equivocaste de plataforma -->
+        <a href="{% url 'selector' %}" class="back-link">
+            <i class="fas fa-arrow-left"></i> Volver a plataformas
+        </a>
+    </div>
+
+</body>
+</html>
+
+
+
+inventario/templates/inventario/inicio.html
+
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Acceso al Sistema - {{ plataforma }}</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root {
+            /* Color dinámico basado en la plataforma seleccionada */
+            --color-login: {{ color|default:"#3498DB" }};
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #2c3e50 0%, #1a252f 100%);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+        }
+
+        .login-card {
+            background: white;
+            padding: 40px;
+            border-radius: 15px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.4);
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+            animation: fadeIn 0.8s ease-out;
+            position: relative;
+            border-top: 5px solid var(--color-login);
+        }
+
+        .login-header i {
+            color: var(--color-login);
+            font-size: 3.5em;
+            margin-bottom: 15px;
+        }
+
+        .login-header h2 {
+            margin: 10px 0;
+            color: #2c3e50;
+            font-size: 1.5em;
+        }
+
+        .platform-badge {
+            display: inline-block;
+            background: var(--color-login);
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: bold;
+            margin-bottom: 25px;
+            text-transform: uppercase;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+            text-align: left;
+            position: relative;
+        }
+
+        .form-group i {
+            position: absolute;
+            left: 15px;
+            top: 40px;
+            color: #95a5a6;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #7f8c8d;
+            font-size: 0.9em;
+            font-weight: 600;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 12px 12px 12px 45px;
+            border: 2px solid #eee;
+            border-radius: 8px;
+            box-sizing: border-box;
+            font-size: 1em;
+            transition: 0.3s;
+            outline: none;
+        }
+
+        .form-group input:focus {
+            border-color: var(--color-login);
+            box-shadow: 0 0 8px rgba(0,0,0,0.05);
+        }
+
+        .btn-login {
+            width: 100%;
+            padding: 14px;
+            background: var(--color-login);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.1em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: 0.3s;
+            margin-top: 10px;
+        }
+
+        .btn-login:hover {
+            filter: brightness(110%);
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        .footer-links {
+            margin-top: 25px;
+            font-size: 0.85em;
+        }
+
+        .footer-links a {
+            color: #95a5a6;
+            text-decoration: none;
+            transition: 0.3s;
+        }
+
+        .footer-links a:hover {
+            color: var(--color-login);
+        }
+
+        /* Mensajes de error */
+        .error-msg {
+            background: #fdf2f2;
+            color: #e74c3c;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 0.85em;
+            margin-bottom: 20px;
+            border-left: 4px solid #e74c3c;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="login-card">
+        <div class="login-header">
+            <i class="{{ icono|default:'fas fa-user-lock' }}"></i>
+            <h2>Acceso al Sistema</h2>
+            <div class="platform-badge">{{ plataforma }}</div>
+        </div>
+
+        {% if form.errors %}
+            <div class="error-msg">
+                <i class="fas fa-exclamation-circle"></i> Usuario o contraseña incorrectos.
+            </div>
+        {% endif %}
+
+        <form method="post">
+            {% csrf_token %}
+            <div class="form-group">
+                <label>Nombre de Usuario</label>
+                <i class="fas fa-user"></i>
+                <input type="text" name="username" placeholder="Ingresa tu usuario" required>
+            </div>
+
+            <div class="form-group">
+                <label>Contraseña</label>
+                <i class="fas fa-key"></i>
+                <input type="password" name="password" placeholder="••••••••" required>
+            </div>
+
+            <button type="submit" class="btn-login">
+                Iniciar Sesión <i class="fas fa-arrow-right" style="margin-left: 10px;"></i>
+            </button>
+        </form>
+
+        <div class="footer-links">
+            <a href="{% url 'selector' %}">
+                <i class="fas fa-exchange-alt"></i> Cambiar de plataforma
+            </a>
+        </div>
+    </div>
+
+</body>
+</html>
+
+
+inventario/templates/inventario/dashboard_global.html
+
+
+{% extends 'inventario/inicio.html' %}
+
+{% block content %}
+<div class="card" style="animation: fadeIn 0.8s ease-out;">
+    <h1 style="color: #2c3e50;">
+        <i class="fas fa-rocket" style="color: var(--color-principal);"></i> ¡Bienvenido al Sistema, {{ user.username }}!
+    </h1>
+    <hr style="border: 0.5px solid #eee; margin: 20px 0;">
+    <p style="font-size: 1.1em; color: #555;">
+        Has iniciado sesión exitosamente en el panel de operaciones de <strong style="color: var(--color-principal); text-transform: uppercase;">{{ canal }}</strong>.
+    </p>
+    
+    <div style="margin-top: 35px; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 25px;">
+        
+        <div style="background: #fdfefe; padding: 25px; border-radius: 12px; border-left: 6px solid #3498db; box-shadow: 0 4px 6px rgba(0,0,0,0.05); transition: 0.3s; cursor: default;" onmouseover="this.style.transform='translateY(-5px)'; this.style.boxShadow='0 8px 15px rgba(0,0,0,0.1)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 4px 6px rgba(0,0,0,0.05)'">
+            <h3 style="margin-top: 0; color: #2980b9; font-size: 1.3em;">
+                <i class="fas fa-warehouse"></i> MAGAZZINO
+            </h3>
+            <p style="color: #7f8c8d; font-size: 0.95em; line-height: 1.5;">
+                Centro de gestión principal. Aquí puedes registrar ingresos, salidas, consultar el stock en tiempo real y verificar los costos base convertidos.
+            </p>
+        </div>
+
+        <div style="background: #fdfefe; padding: 25px; border-radius: 12px; border-left: 6px solid #e67e22; box-shadow: 0 4px 6px rgba(0,0,0,0.05); transition: 0.3s; cursor: default;" onmouseover="this.style.transform='translateY(-5px)'; this.style.boxShadow='0 8px 15px rgba(0,0,0,0.1)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 4px 6px rgba(0,0,0,0.05)'">
+            <h3 style="margin-top: 0; color: #d35400; font-size: 1.3em;">
+                <i class="fas fa-boxes"></i> PERCHERON
+            </h3>
+            <p style="color: #7f8c8d; font-size: 0.95em; line-height: 1.5;">
+                Inventario secundario. Utiliza este módulo para el control de la mercancía en tránsito o productos en ubicaciones de almacenamiento alternas.
+            </p>
+        </div>
+
+        <div style="background: #fdfefe; padding: 25px; border-radius: 12px; border-left: 6px solid var(--color-principal); box-shadow: 0 4px 6px rgba(0,0,0,0.05); transition: 0.3s; cursor: default;" onmouseover="this.style.transform='translateY(-5px)'; this.style.boxShadow='0 8px 15px rgba(0,0,0,0.1)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 4px 6px rgba(0,0,0,0.05)'">
+            <h3 style="margin-top: 0; color: var(--color-principal); font-size: 1.3em;">
+                <i class="fas fa-chart-pie"></i> OPERACIONES
+            </h3>
+            <p style="color: #7f8c8d; font-size: 0.95em; line-height: 1.5;">
+                Herramientas financieras y analíticas. Accede a tus reportes de ventas históricos y calcula proyecciones con el simulador de costos.
+            </p>
+        </div>
+
+    </div>
+</div>
+
+<style>
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+</style>
+{% endblock %}
+
+inventario/templates/inventario/loading.html
+
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cargando... - {{ canal }}</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root {
+            --color-plataforma: {{ request.session.color_actual|default:"#3498DB" }};
+        }
+
+        body.fade-out {
+    opacity: 0;
+    transition: opacity 0.8s ease-out;
+}
+        body {
+            margin: 0; padding: 0; height: 100vh; display: flex;
+            justify-content: center; align-items: center;
+            background: #2c3e50; font-family: 'Segoe UI', sans-serif;
+            color: white; overflow: hidden;
+        }
+        .loading-container { text-align: center; width: 300px; }
+        
+        .icon-box {
+            font-size: 4em; color: var(--color-plataforma);
+            margin-bottom: 20px; animation: pulse 1.5s infinite;
+        }
+
+        .progress-bar-bg {
+            background: rgba(255,255,255,0.1); height: 8px;
+            border-radius: 10px; overflow: hidden; margin: 20px 0;
+        }
+        .progress-bar-fill {
+            background: var(--color-plataforma); height: 100%;
+            width: 0%; border-radius: 10px;
+            box-shadow: 0 0 15px var(--color-plataforma);
+            transition: width 0.05s linear;
+        }
+        
+        .status-text { font-size: 0.9em; letter-spacing: 1px; opacity: 0.8; }
+        .percentage { font-size: 1.5em; font-weight: bold; margin-top: 5px; }
+
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.1); opacity: 0.7; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="loading-container">
+        <div class="icon-box">
+            <i class="{{ request.session.icono_actual|default:'fas fa-globe' }}"></i>
+        </div>
+        <div class="status-text">INICIANDO SISTEMA</div>
+        <div style="font-weight: bold; color: var(--color-plataforma);">{{ canal }}</div>
+        
+        <div class="progress-bar-bg">
+            <div id="bar" class="progress-bar-fill"></div>
+        </div>
+        
+        <div id="percent" class="percentage">0%</div>
+    </div>
+
+    <script>
+        let progress = 0;
+        const bar = document.getElementById('bar');
+        const percentText = document.getElementById('percent');
+
+        const interval = setInterval(() => {
+    progress += Math.floor(Math.random() * 5) + 1;
+    if (progress >= 100) {
+        progress = 100;
+        clearInterval(interval);
+        
+        // Animación de salida
+        setTimeout(() => {
+            document.body.classList.add('fade-out'); // Se desvanece
+            setTimeout(() => {
+                window.location.href = "{% url 'inicio' %}";
+            }, 800); // Espera a que termine el desvanecimiento
+        }, 200);
+    }
+    bar.style.width = progress + "%";
+    percentText.innerText = progress + "%";
+}, 50);
+    </script>
+</body>
+</html>
