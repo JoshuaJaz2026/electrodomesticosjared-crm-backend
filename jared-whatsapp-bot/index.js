@@ -67,9 +67,11 @@ const initializeWhatsAppSession = (sessionId) => {
     console.log(`⏳ Inicializando sesión: ${sessionId}...`);
 
     const client = new Client({
-        authStrategy: new LocalAuth({ clientId: sessionId }),
-        puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'] }
-    });
+    authStrategy: new LocalAuth({ clientId: 'Ventas_Principal' }),
+    puppeteer: {
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    }
+});
 
     client.on('qr', (qr) => { 
         console.log(`📌 QR Generado para la sesión: ${sessionId}`);
