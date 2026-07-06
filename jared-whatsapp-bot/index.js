@@ -15,7 +15,6 @@ if (!process.env.DATABASE_URL) {
 }
 const sql = neon(process.env.DATABASE_URL);
 
-// 🌟 Inicializamos la IA de Gemini
 const aiEnabled = !!process.env.GEMINI_API_KEY;
 const genAI = aiEnabled ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
 if (aiEnabled) console.log("🧠 ¡Asistente de IA (Gemini) configurado y listo!");
@@ -37,8 +36,6 @@ const io = new Server(server, {
 
 const port = process.env.PORT || 3001; 
 
-// 🌟 GESTOR MULTI-SESIÓN Y MEMORIA DE IA
-const activeSessions = new Map(); 
 const botStates = {}; 
 const autoPilotStates = {}; 
 
@@ -57,197 +54,243 @@ async function processMedia(msg) {
     return { mediaUrl: null, mimeType: null, body: msg.body || '[Mensaje no soportado]' };
 }
 
-// 🏭 FUNCIÓN FÁBRICA DE SESIONES DE WHATSAPP
-const initializeWhatsAppSession = (sessionId) => {
-    if (activeSessions.has(sessionId)) {
-        console.log(`⚠️ La sesión ${sessionId} ya está activa.`);
-        return;
-    }
-
-    console.log(`⏳ Inicializando sesión: ${sessionId}...`);
-
-    const client = new Client({
-    authStrategy: new LocalAuth({ clientId: 'Ventas_Principal' }),
+// 🏭 CONFIGURACIÓN MONOLÍTICA (1 SOLO NÚMERO) - PURGADA DE MULTISESIÓN
+const client = new Client({
+    authStrategy: new LocalAuth(), // Sin clientId
     puppeteer: {
         args: ['--no-sandbox', '--disable-setuid-sandbox']
+    },
+    webVersionCache: {
+        type: 'none' // Parche anti-bucles activo
     }
 });
 
-    client.on('qr', (qr) => { 
-        console.log(`📌 QR Generado para la sesión: ${sessionId}`);
-        io.emit('whatsapp-qr', qr); 
-        io.emit('qr', { sessionId, qr }); 
-    });
+let isAuthenticated = false; // Escudo Anti-QR Fantasma
 
-    client.on('loading_screen', (percent, message) => {
-        io.emit('session-loading', { sessionId, percent, message });
-    });
+client.on('qr', (qr) => { 
+    if (isAuthenticated) return; 
+    console.log(`📌 QR Generado. Escanéalo en la terminal o en la pestaña 'Conexiones'.`);
+    io.emit('whatsapp-qr', qr); 
+});
 
-    client.on('ready', () => { 
-        console.log(`✅ ¡Línea de WhatsApp [${sessionId}] conectada y lista!`);
-        io.emit('whatsapp-ready'); 
-        io.emit('session-ready', { sessionId }); 
-    });
+client.on('authenticated', () => {
+    isAuthenticated = true; 
+    console.log(`🔐 Autenticación exitosa. Meta validó la sesión. Sincronizando historial...`);
+    io.emit('whatsapp-ready'); // Obligamos al Frontend a ocultar el QR y saber que estamos listos
+});
 
-    // 🛡️ BLOQUE BLINDADO CONTRA DESCONEXIONES Y CIERRES DE SESIÓN
-    client.on('disconnected', async (reason) => { 
-        console.log(`❌ Línea [${sessionId}] desconectada:`, reason);
-        activeSessions.delete(sessionId);
-        io.emit('whatsapp-disconnected'); 
-        io.emit('session-disconnected', { sessionId });
-        
-        try {
-            await client.destroy();
-            console.log(`🧹 Sesión [${sessionId}] limpiada de la memoria.`);
-        } catch (e) {
-            console.log(`⚠️ Error menor limpiando la sesión [${sessionId}] (ya estaba cerrada).`);
-        }
-    });
+// 📢 RASTREADOR 1: Progreso de descarga desde WhatsApp (Meta)
+client.on('loading_screen', (percent, message) => {
+    console.log(`⏳ Cargando sesión [Ventas_Principal]: ${percent}% - ${message}`);
+    io.emit('session-loading', { percent, message });
+});
 
-    client.on('message_create', async message => {
-        if (message.id._serialized.startsWith('NOTE_')) return;
-        if (message.from.includes('@g.us') || message.to.includes('@g.us') || message.from === 'status@broadcast') return;
+client.on('ready', () => { 
+    isAuthenticated = true; // Doble seguro
+    console.log(`✅ ¡El bot está conectado y listo!`);
+    io.emit('whatsapp-ready'); 
+});
 
-        const { mediaUrl, mimeType, body } = await processMedia(message);
-        const summaryText = mediaUrl ? '[📷 Archivo Adjunto]' : body;
-        const contactId = message.fromMe ? message.to : message.from; 
+client.on('disconnected', async (reason) => { 
+    isAuthenticated = false; 
+    console.log(`❌ Línea desconectada: LOGOUT`);
+    io.emit('whatsapp-disconnected'); 
+    try { 
+        await client.destroy(); 
+        console.log(`🧹 Sesión limpiada de la memoria.`);
+    } catch (e) {}
+});
 
-        try {
-            let contactName = message._data?.notifyName || contactId.replace('@c.us', '');
-            if (!message.fromMe && (!contactName || contactName === contactId.replace('@c.us', ''))) {
-                try {
-                    const contact = await message.getContact();
-                    contactName = contact.name || contact.pushname || contactName;
-                } catch (e) {}
-            }
-            
-            await sql`INSERT INTO contacts (id, name, last_message, updated_at) VALUES (${contactId}, ${contactName}, ${summaryText}, NOW()) ON CONFLICT (id) DO UPDATE SET last_message = ${summaryText}, updated_at = NOW()`;
-            await sql`INSERT INTO messages (id, contact_id, body, is_mine, timestamp, media_url, mime_type, ack) VALUES (${message.id._serialized}, ${contactId}, ${body}, ${message.fromMe}, to_timestamp(${message.timestamp}), ${mediaUrl}, ${mimeType}, ${message.ack}) ON CONFLICT (id) DO NOTHING`;
-            
-            io.emit('whatsapp-message', { id: message.id._serialized, from: contactId, contactName: contactName, summaryText: summaryText, body: body, mediaUrl, mimeType, ack: message.ack, timestamp: new Date(), isMine: message.fromMe });
-        } catch (dbError) {}
+client.on('message_create', async message => {
+    if (message.id._serialized.startsWith('NOTE_')) return;
+    if (message.from === 'status@broadcast') return;
 
-        // 🛑 REGLA DE ORO: SI EL HUMANO ESCRIBE, APAGAR PILOTO AUTOMÁTICO
-        if (message.fromMe) {
-            delete botStates[contactId]; 
-            if (autoPilotStates[contactId]) {
-                autoPilotStates[contactId] = false;
-                io.emit('autopilot-status', { chatId: contactId, isActive: false });
-                console.log(`👤 Humano intervino. Piloto Automático APAGADO para: ${contactId}`);
-            }
-        } else {
-            // 🚀 IA EN PILOTO AUTOMÁTICO
-            if (autoPilotStates[contactId] && aiEnabled) {
-                console.log(`🤖 Generando respuesta automática para: ${contactId}`);
-                try {
-                    const contextMsgs = await sql`SELECT body, is_mine FROM messages WHERE contact_id = ${contactId} ORDER BY timestamp DESC LIMIT 8`;
-                    const chatHistory = contextMsgs.reverse().map(m => `${m.is_mine ? 'Asesor' : 'Cliente'}: ${m.body}`).join('\n');
-                    const prompt = `Eres el mejor vendedor de "Electrodomésticos Jared". \nHistorial reciente:\n${chatHistory}\n\nCliente dice: "${body}". \nGenera una respuesta natural, persuasiva y corta para intentar cerrar la venta. Sin comillas al inicio ni al final.`;
-                    
-                    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-                    const result = await model.generateContent(prompt);
-                    const aiReply = result.response.text().trim();
-                    
-                    const sentMsg = await client.sendMessage(contactId, aiReply);
-                    await sql`INSERT INTO messages (id, contact_id, body, is_mine, timestamp, ack, agent_name) VALUES (${sentMsg.id._serialized}, ${contactId}, ${aiReply}, true, to_timestamp(${sentMsg.timestamp}), ${sentMsg.ack || 1}, 'Piloto Automático (IA)')`;
-                    io.emit('whatsapp-message', { id: sentMsg.id._serialized, from: contactId, contactName: contactId.replace('@c.us', ''), summaryText: aiReply, body: aiReply, ack: sentMsg.ack || 1, timestamp: new Date(), isMine: true, agentName: 'Piloto Automático (IA)' });
-                } catch (e) {
-                    console.error("Error de IA:", e);
-                }
-                return; 
-            }
+    const { mediaUrl, mimeType, body } = await processMedia(message);
+    const summaryText = mediaUrl ? '[📷 Archivo Adjunto]' : body;
+    const contactId = message.fromMe ? message.to : message.from; 
 
-            // 🤖 MENÚ NORMAL
-            const text = (body || '').trim().toLowerCase();
-            const isGreeting = ['hola', 'buenas', 'buenos dias', 'buenas tardes', 'buenas noches', 'info', 'informacion', 'menú', 'menu'].includes(text);
-
-            let botConfig;
+    try {
+        let contactName = message._data?.notifyName || contactId.replace('@c.us', '');
+        if (!message.fromMe && (!contactName || contactName === contactId.replace('@c.us', ''))) {
             try {
-                const result = await sql`SELECT * FROM bot_settings LIMIT 1`;
-                if (result.length > 0) botConfig = result[0];
+                const contact = await message.getContact();
+                contactName = contact.name || contact.pushname || contactName;
             } catch (e) {}
-
-            if (!botConfig) return; 
-
-            if (isGreeting && !botStates[contactId]) {
-                botStates[contactId] = { step: 'AWAITING_OPTION' };
-                await client.sendMessage(contactId, botConfig.greeting_menu);
-            } 
-            else if (botStates[contactId] && botStates[contactId].step === 'AWAITING_OPTION') {
-                if (text === '1') { 
-                    botStates[contactId].step = 'AWAITING_PRODUCT'; 
-                    await client.sendMessage(contactId, botConfig.opt1_reply); 
-                }
-                else if (text === '2') { 
-                    botStates[contactId].step = 'AWAITING_DNI_SUPPORT'; 
-                    await client.sendMessage(contactId, botConfig.opt2_reply); 
-                }
-                else if (text === '3') { 
-                    botStates[contactId].step = 'AWAITING_ORDER'; 
-                    await client.sendMessage(contactId, botConfig.opt3_reply); 
-                }
-                else if (text === '4') { 
-                    delete botStates[contactId]; 
-                    await client.sendMessage(contactId, botConfig.opt4_reply); 
-                    await sql`UPDATE contacts SET label = 'Pendiente' WHERE id = ${contactId}`;
-                    io.emit('label-updated', { chatId: contactId, label: 'Pendiente' });
-                }
-                else { await client.sendMessage(contactId, '❌ Opción no válida. Por favor, responde solo con un número del 1 al 4.'); }
-            }
-            else if (botStates[contactId] && botStates[contactId].step === 'AWAITING_PRODUCT') {
-                const product = body;
-                delete botStates[contactId];
-                await client.sendMessage(contactId, `¡Anotado! 📝 Un asesor revisará el stock de *${product}* y te atenderá en un momento.`);
-                await sql`UPDATE contacts SET label = 'Ventas' WHERE id = ${contactId}`;
-                io.emit('label-updated', { chatId: contactId, label: 'Ventas' });
-            }
-            else if (botStates[contactId] && botStates[contactId].step === 'AWAITING_DNI_SUPPORT') {
-                const dniInfo = body;
-                delete botStates[contactId];
-                await client.sendMessage(contactId, `Gracias. 🛠️ Un especialista revisará el documento/serie *${dniInfo}* y se pondrá en contacto contigo a la brevedad.`);
-                await sql`UPDATE contacts SET label = 'Soporte/Garantía' WHERE id = ${contactId}`;
-                io.emit('label-updated', { chatId: contactId, label: 'Soporte/Garantía' });
-            }
-            else if (botStates[contactId] && botStates[contactId].step === 'AWAITING_ORDER') {
-                const orderInfo = body;
-                delete botStates[contactId];
-                await client.sendMessage(contactId, `Gracias. 🚚 Estamos verificando el estado del pedido *${orderInfo}*. Te responderemos en breve.`);
-                await sql`UPDATE contacts SET label = 'Envíos' WHERE id = ${contactId}`;
-                io.emit('label-updated', { chatId: contactId, label: 'Envíos' });
-            }
         }
-    });
+        
+        await sql`INSERT INTO contacts (id, name, last_message, updated_at) VALUES (${contactId}, ${contactName}, ${summaryText}, NOW()) ON CONFLICT (id) DO UPDATE SET last_message = ${summaryText}, updated_at = NOW()`;
+        await sql`INSERT INTO messages (id, contact_id, body, is_mine, timestamp, media_url, mime_type, ack) VALUES (${message.id._serialized}, ${contactId}, ${body}, ${message.fromMe}, to_timestamp(${message.timestamp}), ${mediaUrl}, ${mimeType}, ${message.ack}) ON CONFLICT (id) DO NOTHING`;
+        
+        io.emit('whatsapp-message', { id: message.id._serialized, from: contactId, contactName: contactName, summaryText: summaryText, body: body, mediaUrl, mimeType, ack: message.ack, timestamp: new Date(), isMine: message.fromMe });
+    } catch (dbError) {}
 
-    client.on('message_ack', async (msg, ack) => {
+    if (message.fromMe) {
+        delete botStates[contactId]; 
+        if (autoPilotStates[contactId]) {
+            autoPilotStates[contactId] = false;
+            io.emit('autopilot-status', { chatId: contactId, isActive: false });
+            console.log(`👤 Humano intervino. Piloto Automático APAGADO para: ${contactId}`);
+        }
+    } else {
+        if (autoPilotStates[contactId] && aiEnabled) {
+            console.log(`🤖 Generando respuesta automática para: ${contactId}`);
+            try {
+                const contextMsgs = await sql`SELECT body, is_mine FROM messages WHERE contact_id = ${contactId} ORDER BY timestamp DESC LIMIT 8`;
+                const chatHistory = contextMsgs.reverse().map(m => `${m.is_mine ? 'Asesor' : 'Cliente'}: ${m.body}`).join('\n');
+                const prompt = `Eres el mejor vendedor de "Electrodomésticos Jared". \nHistorial reciente:\n${chatHistory}\n\nCliente dice: "${body}". \nGenera una respuesta natural, persuasiva y corta para intentar cerrar la venta. Sin comillas al inicio ni al final.`;
+                
+                const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+                const result = await model.generateContent(prompt);
+                const aiReply = result.response.text().trim();
+                
+                const sentMsg = await client.sendMessage(contactId, aiReply);
+                await sql`INSERT INTO messages (id, contact_id, body, is_mine, timestamp, ack, agent_name) VALUES (${sentMsg.id._serialized}, ${contactId}, ${aiReply}, true, to_timestamp(${sentMsg.timestamp}), ${sentMsg.ack || 1}, 'Piloto Automático (IA)')`;
+                io.emit('whatsapp-message', { id: sentMsg.id._serialized, from: contactId, contactName: contactId.replace('@c.us', ''), summaryText: aiReply, body: aiReply, ack: sentMsg.ack || 1, timestamp: new Date(), isMine: true, agentName: 'Piloto Automático (IA)' });
+            } catch (e) {
+                console.error("Error de IA:", e);
+            }
+            return; 
+        }
+
+        const text = (body || '').trim().toLowerCase();
+        const isGreeting = ['hola', 'buenas', 'buenos dias', 'buenas tardes', 'buenas noches', 'info', 'informacion', 'menú', 'menu'].includes(text);
+
+        let botConfig;
         try {
-            await sql`UPDATE messages SET ack = ${ack} WHERE id = ${msg.id._serialized}`;
-            io.emit('message-ack', { messageId: msg.id._serialized, ack: ack });
-        } catch (error) {}
-    });
+            const result = await sql`SELECT * FROM bot_settings LIMIT 1`;
+            if (result.length > 0) botConfig = result[0];
+        } catch (e) {}
 
-    client.initialize();
-    activeSessions.set(sessionId, client);
-};
+        if (!botConfig) return; 
 
-const getClient = (sessionId) => {
-    if (sessionId && activeSessions.has(sessionId)) return activeSessions.get(sessionId);
-    return activeSessions.get('Ventas_Principal') || Array.from(activeSessions.values())[0];
-};
+        if (isGreeting && !botStates[contactId]) {
+            botStates[contactId] = { step: 'AWAITING_OPTION' };
+            await client.sendMessage(contactId, botConfig.greeting_menu);
+        } 
+        else if (botStates[contactId] && botStates[contactId].step === 'AWAITING_OPTION') {
+            if (text === '1') { 
+                botStates[contactId].step = 'AWAITING_PRODUCT'; 
+                await client.sendMessage(contactId, botConfig.opt1_reply); 
+            }
+            else if (text === '2') { 
+                botStates[contactId].step = 'AWAITING_DNI_SUPPORT'; 
+                await client.sendMessage(contactId, botConfig.opt2_reply); 
+            }
+            else if (text === '3') { 
+                botStates[contactId].step = 'AWAITING_ORDER'; 
+                await client.sendMessage(contactId, botConfig.opt3_reply); 
+            }
+            else if (text === '4') { 
+                delete botStates[contactId]; 
+                await client.sendMessage(contactId, botConfig.opt4_reply); 
+                await sql`UPDATE contacts SET label = 'Pendiente' WHERE id = ${contactId}`;
+                io.emit('label-updated', { chatId: contactId, label: 'Pendiente' });
+            }
+            else { await client.sendMessage(contactId, '❌ Opción no válida. Por favor, responde solo con un número del 1 al 4.'); }
+        }
+        else if (botStates[contactId] && botStates[contactId].step === 'AWAITING_PRODUCT') {
+            const product = body;
+            delete botStates[contactId];
+            await client.sendMessage(contactId, `¡Anotado! 📝 Un asesor revisará el stock de *${product}* y te atenderá en un momento.`);
+            await sql`UPDATE contacts SET label = 'Ventas' WHERE id = ${contactId}`;
+            io.emit('label-updated', { chatId: contactId, label: 'Ventas' });
+        }
+        else if (botStates[contactId] && botStates[contactId].step === 'AWAITING_DNI_SUPPORT') {
+            const dniInfo = body;
+            delete botStates[contactId];
+            await client.sendMessage(contactId, `Gracias. 🛠️ Un especialista revisará el documento/serie *${dniInfo}* y se pondrá en contacto contigo a la brevedad.`);
+            await sql`UPDATE contacts SET label = 'Soporte/Garantía' WHERE id = ${contactId}`;
+            io.emit('label-updated', { chatId: contactId, label: 'Soporte/Garantía' });
+        }
+        else if (botStates[contactId] && botStates[contactId].step === 'AWAITING_ORDER') {
+            const orderInfo = body;
+            delete botStates[contactId];
+            await client.sendMessage(contactId, `Gracias. 🚚 Estamos verificando el estado del pedido *${orderInfo}*. Te responderemos en breve.`);
+            await sql`UPDATE contacts SET label = 'Envíos' WHERE id = ${contactId}`;
+            io.emit('label-updated', { chatId: contactId, label: 'Envíos' });
+        }
+    }
+});
+
+client.on('message_ack', async (msg, ack) => {
+    try {
+        await sql`UPDATE messages SET ack = ${ack} WHERE id = ${msg.id._serialized}`;
+        io.emit('message-ack', { messageId: msg.id._serialized, ack: ack });
+    } catch (error) {}
+});
+
+client.initialize();
 
 io.on('connection', (socket) => {
-    const isReady = activeSessions.size > 0;
-    if (isReady) socket.emit('whatsapp-ready');
-    socket.on('check-status', () => { if (activeSessions.size > 0) socket.emit('whatsapp-ready'); });
+    socket.on('check-status', () => { if (client.info) socket.emit('whatsapp-ready'); });
 
-    socket.on('get-sessions', () => {
-        socket.emit('load-sessions', Array.from(activeSessions.keys()));
+    socket.on('request-chats', async () => {
+        if (!client.info) return;
+
+        try {
+            const allChats = await client.getChats();
+            const validChats = allChats.filter(c => !c.id._serialized.includes('@broadcast') && !c.id._serialized.includes('@lid'));
+            
+            validChats.sort((a, b) => {
+                const timeA = a.timestamp || (a.lastMessage ? a.lastMessage.timestamp : 0);
+                const timeB = b.timestamp || (b.lastMessage ? b.lastMessage.timestamp : 0);
+                return timeB - timeA;
+            });
+
+            const topChats = validChats.slice(0, 5);
+            
+            const dbContacts = await sql`SELECT id, label, full_name, document_id, email, alt_phone, address, district, reference, customer_type, assigned_to FROM contacts`;
+            const contactsMap = {};
+            dbContacts.forEach(c => contactsMap[c.id] = c);
+
+            let processed = 0;
+            const totalChats = topChats.length;
+            const cleanChats = []; 
+
+            for (const c of topChats) {
+                const dbInfo = contactsMap[c.id._serialized] || {};
+                let chatName = c.name;
+
+                if (!c.isGroup && (!chatName || chatName === c.id.user)) {
+                    try {
+                        const contact = await c.getContact();
+                        chatName = contact.name || contact.pushname || c.id.user;
+                    } catch (e) {}
+                }
+
+                processed++;
+                const currentPercent = Math.floor((processed / totalChats) * 100);
+                
+                io.emit('session-loading', { percent: currentPercent, message: `Sincronizando perfil ${processed} de ${totalChats}...` });
+
+                cleanChats.push({
+                    id: c.id._serialized, 
+                    name: chatName || c.id.user,
+                    lastMessage: c.lastMessage ? (c.lastMessage.hasMedia ? '[📷 Archivo Adjunto]' : c.lastMessage.body) : 'Sin mensajes recientes',
+                    label: dbInfo.label || null, 
+                    assignedTo: dbInfo.assigned_to || null,
+                    timestamp: c.timestamp || (c.lastMessage ? c.lastMessage.timestamp : 0),
+                    isGroup: c.isGroup,
+                    crmData: { fullName: dbInfo.full_name || '', documentId: dbInfo.document_id || '', email: dbInfo.email || '', altPhone: dbInfo.alt_phone || '', address: dbInfo.address || '', district: dbInfo.district || '', reference: dbInfo.reference || '', customerType: dbInfo.customer_type || '' }
+                });
+            }
+            
+            socket.emit('load-chats', cleanChats);
+            console.log(`✅ [CRM] ¡Sincronización de los ${totalChats} chats finalizada con éxito!`);
+        } catch (error) { 
+            console.log('⏳ Esperando a que WhatsApp termine de sincronizar...'); 
+        }
     });
 
-    socket.on('start-session', ({ sessionId }) => {
-        initializeWhatsAppSession(sessionId);
+    socket.on('request-pairing-code', async (data) => {
+        try {
+            const code = await client.requestPairingCode(data.phoneNumber);
+            socket.emit('pairing-code-success', { code });
+        } catch (error) {
+            socket.emit('pairing-error', 'Error al generar el código. Verifica el número o intenta con QR.');
+        }
     });
 
-    // ⚡ RECIBIR ORDEN DE ENCENDER/APAGAR PILOTO AUTOMÁTICO
     socket.on('toggle-autopilot', (data) => {
         autoPilotStates[data.chatId] = data.isActive;
         console.log(`🤖 Piloto Automático ${data.isActive ? 'ENCENDIDO' : 'APAGADO'} para: ${data.chatId}`);
@@ -341,10 +384,12 @@ io.on('connection', (socket) => {
 
     socket.on('add-product', async (data) => {
         try {
-            await sql`INSERT INTO products (name, price, stock, category, image) VALUES (${data.name}, ${data.price}, ${data.stock}, ${data.category}, ${data.image})`;
+            await sql`INSERT INTO products (name, brand, cost_price, price, stock, category, image) VALUES (${data.name}, ${data.brand}, ${data.costPrice}, ${data.price}, ${data.stock}, ${data.category}, ${data.image})`;
             const products = await sql`SELECT * FROM products ORDER BY category, name ASC`;
             io.emit('load-products', products);
-        } catch (error) {}
+        } catch (error) {
+            console.error("Error al agregar producto:", error);
+        }
     });
 
     socket.on('delete-product', async (id) => {
@@ -391,6 +436,44 @@ io.on('connection', (socket) => {
         try { const tickets = await sql`SELECT * FROM tickets WHERE contact_id = ${contactId} ORDER BY created_at DESC`; socket.emit('load-tickets', tickets); } catch (error) {}
     });
 
+    socket.on('get-all-contacts', async () => {
+        try {
+            const contacts = await sql`SELECT id, name, full_name, document_id, email, alt_phone, address, district, customer_type, label, TO_CHAR(updated_at, 'DD/MM/YYYY HH24:MI') as last_seen FROM contacts ORDER BY updated_at DESC`;
+            socket.emit('load-all-contacts', contacts);
+        } catch (error) {
+            console.error("Error cargando directorio:", error);
+        }
+    });
+    
+    socket.on('get-all-quotes', async () => {
+        try {
+            const quotes = await sql`
+                SELECT q.quote_id, q.contact_id, c.name as contact_name, q.items, q.total, q.status, TO_CHAR(q.created_at, 'DD/MM/YYYY HH24:MI') as date 
+                FROM quotes q 
+                LEFT JOIN contacts c ON q.contact_id = c.id 
+                ORDER BY q.created_at DESC
+            `;
+            socket.emit('load-all-quotes', quotes);
+        } catch (error) {
+            console.error("Error cargando cotizaciones:", error);
+        }
+    });
+
+    socket.on('update-quote-status', async (data) => {
+        try {
+            await sql`UPDATE quotes SET status = ${data.status} WHERE quote_id = ${data.quoteId}`;
+            const quotes = await sql`
+                SELECT q.quote_id, q.contact_id, c.name as contact_name, q.items, q.total, q.status, TO_CHAR(q.created_at, 'DD/MM/YYYY HH24:MI') as date 
+                FROM quotes q 
+                LEFT JOIN contacts c ON q.contact_id = c.id 
+                ORDER BY q.created_at DESC
+            `;
+            io.emit('load-all-quotes', quotes);
+        } catch (error) {
+            console.error("Error actualizando cotización:", error);
+        }
+    });
+
     socket.on('create-ticket', async (data) => {
         try {
             await sql`INSERT INTO tickets (contact_id, agent_name, subject, description, serial_number, status) VALUES (${data.contactId}, ${data.agentName}, ${data.subject}, ${data.description}, ${data.serialNumber}, 'Abierto')`;
@@ -430,82 +513,6 @@ io.on('connection', (socket) => {
         } catch (error) {}
     });
 
-    socket.on('request-chats', async (data) => {
-        const client = getClient(data?.sessionId);
-        if (!client || !client.info) return;
-
-        try {
-            // 1. Obtener chats activos
-            const allChats = await client.getChats();
-            const validChats = allChats.filter(c => !c.id._serialized.includes('@broadcast') && !c.id._serialized.includes('@g.us') && !c.id._serialized.includes('@lid'));
-            
-            // 2. Obtener contactos de la libreta (Para forzar sincronización)
-            const allContacts = await client.getContacts();
-            const savedContacts = allContacts.filter(c => c.isMyContact && !c.id._serialized.includes('@g.us'));
-
-            // 3. Fusionar Chats + Contactos
-            const chatIds = new Set(validChats.map(c => c.id._serialized));
-            
-            savedContacts.forEach(contact => {
-                if (!chatIds.has(contact.id._serialized)) {
-                    validChats.push({
-                        id: contact.id,
-                        name: contact.name || contact.pushname || contact.number,
-                        lastMessage: { body: 'Sin mensajes recientes', timestamp: 0 },
-                        timestamp: 0,
-                        getContact: async () => contact 
-                    });
-                }
-            });
-
-            // 4. Ordenar todo
-            const sortedChats = validChats.sort((a, b) => {
-                const timeA = a.timestamp || (a.lastMessage ? a.lastMessage.timestamp : 0);
-                const timeB = b.timestamp || (b.lastMessage ? b.lastMessage.timestamp : 0);
-                return timeB - timeA;
-            });
-            
-            const dbContacts = await sql`SELECT id, label, full_name, document_id, email, alt_phone, address, district, reference, customer_type, assigned_to FROM contacts`;
-            const contactsMap = {};
-            dbContacts.forEach(c => contactsMap[c.id] = c);
-
-            let processed = 0;
-            const totalChats = sortedChats.length;
-            const cleanChats = []; 
-
-            for (const c of sortedChats) {
-                const dbInfo = contactsMap[c.id._serialized] || {};
-                let chatName = c.name;
-
-                if (!chatName || chatName === c.id.user) {
-                    try {
-                        const contact = await c.getContact();
-                        chatName = contact.name || contact.pushname || c.id.user;
-                    } catch (e) {}
-                }
-
-                processed++;
-                const currentPercent = Math.floor((processed / totalChats) * 100);
-                if (currentPercent % 5 === 0 || processed === totalChats) {
-                     socket.emit('session-loading', { sessionId: data?.sessionId || 'Ventas_Principal', percent: currentPercent, message: `Sincronizando perfil ${processed} de ${totalChats}...` });
-                }
-
-                cleanChats.push({
-                    id: c.id._serialized, 
-                    name: chatName || c.id.user,
-                    lastMessage: c.lastMessage ? (c.lastMessage.hasMedia ? '[📷 Archivo Adjunto]' : c.lastMessage.body) : 'Sin mensajes recientes',
-                    label: dbInfo.label || null, 
-                    assignedTo: dbInfo.assigned_to || null,
-                    timestamp: c.timestamp || (c.lastMessage ? c.lastMessage.timestamp : 0),
-                    crmData: { fullName: dbInfo.full_name || '', documentId: dbInfo.document_id || '', email: dbInfo.email || '', altPhone: dbInfo.alt_phone || '', address: dbInfo.address || '', district: dbInfo.district || '', reference: dbInfo.reference || '', customerType: dbInfo.customer_type || '' }
-                });
-            }
-            socket.emit('load-chats', cleanChats);
-        } catch (error) { 
-            console.log('⏳ Esperando a que WhatsApp termine de sincronizar...'); 
-        }
-    });
-
     socket.on('update-label', async (data) => {
         try {
             await sql`INSERT INTO contacts (id, name, label) VALUES (${data.chatId}, ${data.chatId}, ${data.label}) ON CONFLICT (id) DO UPDATE SET label = ${data.label}`;
@@ -520,14 +527,13 @@ io.on('connection', (socket) => {
         } catch (error) {}
     });
 
-    socket.on('request-history', async (chatId, sessionId) => {
-        const client = getClient(sessionId);
+    socket.on('request-history', async (chatId) => {
         try {
             let rawData = await sql`SELECT id, contact_id as from, body, is_mine, is_note, media_url, mime_type, ack, agent_name, EXTRACT(EPOCH FROM timestamp) as unix_ts FROM messages WHERE contact_id = ${chatId} ORDER BY timestamp ASC`;
             let dbMessages = rawData.map(m => ({ id: m.id, from: m.from, body: m.body, isMine: m.is_mine === true || m.is_mine === 'true' || m.is_mine === 't', isNote: m.is_note === true, mediaUrl: m.media_url, mimeType: m.mime_type, ack: m.ack, agentName: m.agent_name, timestamp: new Date(m.unix_ts * 1000).toISOString() }));
             if (dbMessages.length > 0) socket.emit('load-history', { chatId, messages: dbMessages });
             
-            if (!client) return;
+            if (!client.info) return;
             const chat = await client.getChatById(chatId);
             if (!chat) return; 
             await sql`INSERT INTO contacts (id, name) VALUES (${chatId}, ${chat.name || chatId}) ON CONFLICT (id) DO NOTHING`;
@@ -553,10 +559,11 @@ io.on('connection', (socket) => {
         } catch (error) {}
     });
 
+    // ====================================================
+    // ✅ EVENTO ACTUALIZADO: send-message (Textos y Medios)
+    // ====================================================
     socket.on('send-message', async (data) => {
-        const client = getClient(data.sessionId);
-        if (!client) return;
-        
+        if (!client.info) return;
         try {
             if (data.media) {
                 const media = new MessageMedia(data.media.mimeType, data.media.data, data.media.name);
@@ -567,12 +574,31 @@ io.on('connection', (socket) => {
                 const mediaUrl = `http://localhost:3001/media/${filename}`;
                 
                 await sql`INSERT INTO messages (id, contact_id, body, is_mine, timestamp, media_url, mime_type, ack, agent_name) VALUES (${sentMsg.id._serialized}, ${data.to}, ${data.text}, true, to_timestamp(${sentMsg.timestamp}), ${mediaUrl}, ${data.media.mimeType}, ${sentMsg.ack || 1}, ${data.agentName}) ON CONFLICT (id) DO UPDATE SET media_url = ${mediaUrl}, mime_type = ${data.media.mimeType}, agent_name = ${data.agentName}`;
+                
+                // Eco al CRM (Medios)
                 io.emit('whatsapp-message', { id: sentMsg.id._serialized, from: data.to, contactName: data.to.split('@')[0], summaryText: '[📷 Archivo Adjunto]', body: data.text, mediaUrl: mediaUrl, mimeType: data.media.mimeType, ack: sentMsg.ack || 1, timestamp: new Date(sentMsg.timestamp * 1000), isMine: true, agentName: data.agentName });
             } else {
                 const sentMsg = await client.sendMessage(data.to, data.text);
                 await sql`INSERT INTO messages (id, contact_id, body, is_mine, timestamp, ack, agent_name) VALUES (${sentMsg.id._serialized}, ${data.to}, ${data.text}, true, to_timestamp(${sentMsg.timestamp}), ${sentMsg.ack || 1}, ${data.agentName}) ON CONFLICT (id) DO UPDATE SET agent_name = ${data.agentName}`;
+                
+                // 🚀 ESTE ERA EL ESLABÓN PERDIDO: Eco al CRM (Textos normales y Cotizaciones)
+                io.emit('whatsapp-message', {
+                    id: sentMsg.id._serialized,
+                    from: data.to,
+                    contactName: data.to.split('@')[0],
+                    summaryText: data.text,
+                    body: data.text,
+                    mediaUrl: null,
+                    mimeType: null,
+                    ack: sentMsg.ack || 1,
+                    timestamp: new Date(sentMsg.timestamp * 1000),
+                    isMine: true,
+                    agentName: data.agentName
+                });
             }
-        } catch (error) {}
+        } catch (error) {
+            console.error("Error al enviar mensaje:", error);
+        }
     });
 
     socket.on('send-note', async (data) => {
@@ -582,30 +608,21 @@ io.on('connection', (socket) => {
         } catch (error) {}
     });
 
-    // 🌐 GENERAR ENLACE DE COTIZACIÓN (LANDING PAGE)
+    // ==========================================
+    // 🛒 CREACIÓN DE COTIZACIONES (URL PÚBLICA)
+    // ==========================================
     socket.on('create-quote', async (data) => {
         try {
-            // Generar un ID único y corto, ej: COT-X7B9A
             const quoteId = 'COT-' + Math.random().toString(36).substring(2, 8).toUpperCase();
-
-            // Guardar el carrito en la base de datos PostgreSQL
-            await sql`INSERT INTO quotes (quote_id, contact_id, items, total, status) 
-                      VALUES (${quoteId}, ${data.contactId}, ${JSON.stringify(data.items)}, ${data.total}, 'Pendiente')`;
-
-            // Construir el enlace mágico (Usa localhost ahora, lo cambiaremos al subir a la nube)
-            const quoteUrl = `http://localhost:3000/cotizacion/${quoteId}`;
-
-            // Enviarle el enlace de vuelta al frontend para que lo mande por WhatsApp
+            await sql`INSERT INTO quotes (quote_id, contact_id, items, total, status) VALUES (${quoteId}, ${data.contactId}, ${JSON.stringify(data.items)}, ${data.total}, 'Pendiente')`;
+            
+            // 🚀 ACTUALIZADO: URL para que WhatsApp lo vuelva azul (clickeable)
+            const quoteUrl = `https://jared-crm-frontend.onrender.com/cotizacion/${quoteId}`;
+            
             socket.emit('quote-created', { quoteId, quoteUrl, contactId: data.contactId, text: data.text });
-            console.log(`✅ Cotización generada: ${quoteUrl}`);
-
-        } catch (error) {
-            console.error("❌ Error creando cotización:", error);
-            socket.emit('quote-error', 'Hubo un error al generar el enlace de la cotización.');
-        }
+        } catch (error) { socket.emit('quote-error', 'Hubo un error.'); }
     });
 
 });
 
-initializeWhatsAppSession('Ventas_Principal');
 server.listen(port, () => console.log(`🚀 Servidor del bot corriendo en el puerto ${port}`));
