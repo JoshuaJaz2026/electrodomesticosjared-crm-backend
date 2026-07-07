@@ -56,12 +56,21 @@ async function processMedia(msg) {
 
 // 🏭 CONFIGURACIÓN MONOLÍTICA (1 SOLO NÚMERO) - PURGADA DE MULTISESIÓN
 const client = new Client({
-    authStrategy: new LocalAuth(), // Sin clientId
+    authStrategy: new LocalAuth(),
     puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage', // <- VITAL PARA RENDER: Evita que colapse la RAM
+            '--disable-accelerated-2d-canvas', // Apaga el motor gráfico
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu' // Apaga la tarjeta de video que no usamos
+        ]
     },
     webVersionCache: {
-        type: 'none' // Parche anti-bucles activo
+        type: 'none' 
     }
 });
 
