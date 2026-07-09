@@ -67,8 +67,8 @@ app.post("/webhook", async (req, res) => {
   // 🚨 EL RASTREADOR DE RAYOS X: Imprime todo lo crudo que llega de Meta
   console.log("\n📦 [Meta] PAQUETE RECIBIDO EN BRUTO:", JSON.stringify(body, null, 2));
 
-  if (body.object) {
-    if (body.entry && body.entry[0].changes && body.entry[0].changes[0].value.messages && body.entry[0].changes[0].value.messages[0]) {
+  try {
+    if (body.object === 'whatsapp_business_account' && body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
       
       let msgObj = body.entry[0].changes[0].value.messages[0]; 
       let contactInfo = body.entry[0].changes[0].value.contacts?.[0]; 
@@ -82,15 +82,13 @@ app.post("/webhook", async (req, res) => {
 
       console.log(`💬 [Meta] Nuevo mensaje de ${pushName} (${incomingNumber}): ${text}`); 
 
-      try {
-        await sql`INSERT INTO contacts (id, name, last_message, updated_at) VALUES (${contactId}, ${pushName}, ${text}, NOW()) ON CONFLICT (id) DO UPDATE SET last_message = ${text}, updated_at = NOW()`; 
-        await sql`INSERT INTO messages (id, contact_id, body, is_mine, timestamp, ack) VALUES (${messageId}, ${contactId}, ${text}, false, NOW(), 1) ON CONFLICT (id) DO NOTHING`; 
-        
-        io.emit('whatsapp-message', { id: messageId, from: contactId, contactName: pushName, summaryText: text, body: text, mediaUrl: null, mimeType: null, ack: 1, timestamp: new Date(), isMine: false }); 
-      } catch (error) {
-        console.error("Error BD recibiendo:", error); 
-      }
+      await sql`INSERT INTO contacts (id, name, last_message, updated_at) VALUES (${contactId}, ${pushName}, ${text}, NOW()) ON CONFLICT (id) DO UPDATE SET last_message = ${text}, updated_at = NOW()`; 
+      await sql`INSERT INTO messages (id, contact_id, body, is_mine, timestamp, ack) VALUES (${messageId}, ${contactId}, ${text}, false, NOW(), 1) ON CONFLICT (id) DO NOTHING`; 
+      
+      io.emit('whatsapp-message', { id: messageId, from: contactId, contactName: pushName, summaryText: text, body: text, mediaUrl: null, mimeType: null, ack: 1, timestamp: new Date(), isMine: false }); 
     }
+  } catch (error) {
+    console.error("Error procesando Webhook:", error); 
   }
 });
 
