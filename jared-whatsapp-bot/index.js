@@ -15,13 +15,12 @@ app.use(express.json());
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "*", // Permite conexiones desde tu frontend local o en Vercel/Render
+    origin: "*", 
     methods: ["GET", "POST"]
   },
-  maxHttpBufferSize: 1e8 // Permite recibir imágenes pesadas
+  maxHttpBufferSize: 1e8 
 });
 
-// Configuración del puerto dinámico para Render
 const port = process.env.PORT || 3001;
 
 // ---------------------------------------------------------------------------------
@@ -33,12 +32,11 @@ const sql = neon(process.env.DATABASE_URL);
 // 3. LA MAGIA OFICIAL DE META (Webhooks y API Cloud)
 // ---------------------------------------------------------------------------------
 
-// Credenciales Oficiales de Meta leídas desde tu .env 
 const META_PHONE_ID = process.env.META_PHONE_ID;
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN; // "jared_crm_secreto_123"
 
-// --- ENDPOINT: VALIDACIÓN INICIAL DEL WEBHOOK (El que Meta usa para comprobar que existes) ---
+// --- ENDPOINT: VALIDACIÓN INICIAL DEL WEBHOOK ---
 app.get("/webhook", (req, res) => {
   console.log("🔔 [Meta] Intentando validar el Webhook...");
   
@@ -46,11 +44,9 @@ app.get("/webhook", (req, res) => {
   let token = req.query["hub.verify_token"];
   let challenge = req.query["hub.challenge"];
 
-  // Comprueba si el token que envía Meta coincide con tu secreto 
   if (mode && token) {
     if (mode === "subscribe" && token === META_VERIFY_TOKEN) { 
       console.log("✅ [Meta] Webhook verificado exitosamente!");
-      // Responde con el número "challenge" para que Meta apruebe la conexión
       res.status(200).send(challenge);
     } else {
       console.log("❌ [Meta] Falló la verificación. Tokens no coinciden.");
@@ -63,10 +59,13 @@ app.get("/webhook", (req, res) => {
 
 // --- ENDPOINT: RECEPCIÓN DE MENSAJES EN TIEMPO REAL ---
 app.post("/webhook", async (req, res) => {
-  // Responde inmediatamente con "200 OK" para que Meta sepa que recibiste el paquete y no te bloquee
+  // Responde inmediatamente con "200 OK" para que Meta no te bloquee
   res.sendStatus(200);
 
   let body = req.body;
+
+  // 🚨 EL RASTREADOR DE RAYOS X: Imprime todo lo crudo que llega de Meta
+  console.log("\n📦 [Meta] PAQUETE RECIBIDO EN BRUTO:", JSON.stringify(body, null, 2));
 
   if (body.object) {
     if (body.entry && body.entry[0].changes && body.entry[0].changes[0].value.messages && body.entry[0].changes[0].value.messages[0]) {
@@ -74,8 +73,8 @@ app.post("/webhook", async (req, res) => {
       let msgObj = body.entry[0].changes[0].value.messages[0]; 
       let contactInfo = body.entry[0].changes[0].value.contacts?.[0]; 
       
-      let incomingNumber = msgObj.from; // Número del cliente
-      let pushName = contactInfo?.profile?.name || incomingNumber; // Nombre público del cliente 
+      let incomingNumber = msgObj.from; 
+      let pushName = contactInfo?.profile?.name || incomingNumber; 
       let text = msgObj.text ? msgObj.text.body : '[Mensaje no es texto]'; 
       let messageId = msgObj.id; 
       
@@ -184,7 +183,6 @@ io.on('connection', (socket) => {
         } catch (error) {} 
     });
 
-    // Gestión de usuarios: listar, crear, eliminar 
     socket.on('get-users', async () => { 
         try {
             const users = await sql`SELECT id, username, role FROM users ORDER BY id ASC`; 
@@ -212,9 +210,6 @@ io.on('connection', (socket) => {
 
 });
 
-// ---------------------------------------------------------------------------------
-// 5. ENCENDIDO DEL SERVIDOR
-// ---------------------------------------------------------------------------------
 server.listen(port, () => {
   console.log(`🚀 Servidor Ultraligero (Cloud API) corriendo en puerto ${port}`);
 });
