@@ -247,6 +247,30 @@ io.on('connection', (socket) => {
         } catch (error) {} 
     });
 
+    // 🌟 NUEVO EVENTO: Asignación Manual de Agentes
+    socket.on('assign-agent', async (data) => {
+        try {
+            const agentToAssign = data.agentName === "" ? null : data.agentName; // Maneja la opción "Nadie"
+            
+            // 1. Guardar en la Base de Datos
+            await sql`
+                UPDATE contacts 
+                SET assigned_to = ${agentToAssign} 
+                WHERE id = ${data.chatId}
+            `;
+            
+            // 2. Avisarle a todos los usuarios conectados (Frontend) para que la UI se actualice en vivo
+            io.emit('agent-assigned', { 
+                chatId: data.chatId, 
+                agentName: agentToAssign 
+            });
+            
+            console.log(`👤 Reasignación manual: Chat ${data.chatId} asignado a ${agentToAssign || 'Bandeja Global'}`);
+        } catch (error) {
+            console.error("❌ Error al asignar agente:", error);
+        }
+    });
+
 });
 
 server.listen(port, () => {
