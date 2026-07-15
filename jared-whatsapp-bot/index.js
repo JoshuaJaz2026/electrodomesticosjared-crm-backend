@@ -247,7 +247,7 @@ io.on('connection', (socket) => {
         } catch (error) {} 
     });
 
-    // 🌟 NUEVO EVENTO: Asignación Manual de Agentes
+    // 🌟 EVENTO: Asignación Manual de Agentes
     socket.on('assign-agent', async (data) => {
         try {
             const agentToAssign = data.agentName === "" ? null : data.agentName; // Maneja la opción "Nadie"
@@ -268,6 +268,30 @@ io.on('connection', (socket) => {
             console.log(`👤 Reasignación manual: Chat ${data.chatId} asignado a ${agentToAssign || 'Bandeja Global'}`);
         } catch (error) {
             console.error("❌ Error al asignar agente:", error);
+        }
+    });
+
+    // 🌟 NUEVO EVENTO: Obtener el directorio completo de clientes
+    socket.on('get-all-contacts', async () => {
+        try {
+            // Hacemos un SELECT de todos los clientes, ordenados por fecha de actualización
+            const allContacts = await sql`
+                SELECT 
+                    id, 
+                    name, 
+                    full_name, 
+                    document_id, 
+                    customer_type, 
+                    label, 
+                    TO_CHAR(updated_at, 'DD/MM/YYYY HH24:MI') as last_seen 
+                FROM contacts 
+                ORDER BY updated_at DESC
+            `;
+            
+            // Le enviamos la base de datos completa de vuelta al frontend
+            socket.emit('load-all-contacts', allContacts);
+        } catch (error) {
+            console.error("❌ Error obteniendo directorio:", error);
         }
     });
 
