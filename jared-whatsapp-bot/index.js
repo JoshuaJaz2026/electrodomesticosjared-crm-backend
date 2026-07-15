@@ -57,6 +57,9 @@ app.get("/webhook", (req, res) => {
   }
 });
 
+// Variable global para recordar de quién es el turno (Round-Robin)
+let turnoActualIndex = 0; 
+
 // --- ENDPOINT: RECEPCIÓN DE MENSAJES EN TIEMPO REAL ---
 app.post("/webhook", async (req, res) => {
   // Responde inmediatamente con "200 OK" para que Meta no te bloquee
@@ -82,8 +85,46 @@ app.post("/webhook", async (req, res) => {
 
       console.log(`💬 [Meta] Nuevo mensaje de ${pushName} (${incomingNumber}): ${text}`); 
 
-      await sql`INSERT INTO contacts (id, name, last_message, updated_at) VALUES (${contactId}, ${pushName}, ${text}, NOW()) ON CONFLICT (id) DO UPDATE SET last_message = ${text}, updated_at = NOW()`; 
-      await sql`INSERT INTO messages (id, contact_id, body, is_mine, timestamp, ack) VALUES (${messageId}, ${contactId}, ${text}, false, NOW(), 1) ON CONFLICT (id) DO NOTHING`; 
+      // 1. REVISAR SI EL CLIENTE YA EXISTE
+      let clienteExistente = await sql`SELECT assigned_to FROM contacts WHERE id = ${contactId}`;
+      let asesorAsignado = null;
+
+      if (clienteExistente.length > 0 && clienteExistente[0].assigned_to) {
+          // El cliente ya es antiguo, se queda con el asesor que ya tenía
+          asesorAsignado = clienteExistente[0].assigned_to;
+      } else {
+          // 2. ¡ES UN CLIENTE NUEVO! A REPARTIR (ROUND-ROBIN)
+          let asesores = await sql`SELECT username FROM users WHERE role = 'Agente' ORDER BY id ASC`;
+
+          if (asesores.length > 0) {
+              // Le damos el cliente al asesor que le toca el turno
+              asesorAsignado = asesores[turnoActualIndex].username;
+              console.log(`🎰 ¡Nuevo Lead! Asignado automáticamente a: ${asesorAsignado}`);
+
+              // Movemos la ruleta para el siguiente turno
+              turnoActualIndex++;
+              
+              // Si la ruleta llegó al último asesor, la reiniciamos al primero
+              if (turnoActualIndex >= asesores.length) {
+                  turnoActualIndex = 0; 
+              }
+          }
+      }
+
+      // 3. GUARDAR EL CLIENTE CON SU ASESOR ASIGNADO
+      await sql`
+        INSERT INTO contacts (id, name, last_message, updated_at, assigned_to) 
+        VALUES (${contactId}, ${pushName}, ${text}, NOW(), ${asesorAsignado}) 
+        ON CONFLICT (id) DO UPDATE 
+        SET last_message = ${text}, updated_at = NOW()
+      `; 
+      
+      // 4. GUARDAR EL MENSAJE EN EL HISTORIAL
+      await sql`
+        INSERT INTO messages (id, contact_id, body, is_mine, timestamp, ack) 
+        VALUES (${messageId}, ${contactId}, ${text}, false, NOW(), 1) 
+        ON CONFLICT (id) DO NOTHING
+      `; 
       
       io.emit('whatsapp-message', { id: messageId, from: contactId, contactName: pushName, summaryText: text, body: text, mediaUrl: null, mimeType: null, ack: 1, timestamp: new Date(), isMine: false }); 
     }
@@ -207,7 +248,7 @@ io.on('connection', (socket) => {
     });
 
 });
-//
+
 server.listen(port, () => {
   console.log(`🚀 Servidor Ultraligero (Cloud API) corriendo en puerto ${port}`);
 });
