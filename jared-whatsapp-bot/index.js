@@ -34,12 +34,11 @@ const sql = neon(process.env.DATABASE_URL);
 
 const META_PHONE_ID = process.env.META_PHONE_ID;
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
-const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN; // "jared_crm_secreto_123"
+const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN; 
 
 // --- ENDPOINT: VALIDACIÓN INICIAL DEL WEBHOOK ---
 app.get("/webhook", (req, res) => {
   console.log("🔔 [Meta] Intentando validar el Webhook...");
-  
   let mode = req.query["hub.mode"];
   let token = req.query["hub.verify_token"];
   let challenge = req.query["hub.challenge"];
@@ -57,18 +56,14 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// Variable global para recordar de quién es el turno (Round-Robin)
+// 🤖 LA MEMORIA A CORTO PLAZO DEL BOT (State Machine)
+let botStates = {}; 
 let turnoActualIndex = 0; 
 
 // --- ENDPOINT: RECEPCIÓN DE MENSAJES EN TIEMPO REAL ---
 app.post("/webhook", async (req, res) => {
-  // Responde inmediatamente con "200 OK" para que Meta no te bloquee
   res.sendStatus(200);
-
   let body = req.body;
-
-  // 🚨 EL RASTREADOR DE RAYOS X: Imprime todo lo crudo que llega de Meta
-  console.log("\n📦 [Meta] PAQUETE RECIBIDO EN BRUTO:", JSON.stringify(body, null, 2));
 
   try {
     if (body.object === 'whatsapp_business_account' && body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
@@ -82,36 +77,96 @@ app.post("/webhook", async (req, res) => {
       let messageId = msgObj.id; 
       
       let contactId = incomingNumber + '@c.us'; 
-
       console.log(`💬 [Meta] Nuevo mensaje de ${pushName} (${incomingNumber}): ${text}`); 
 
-      // 1. REVISAR SI EL CLIENTE YA EXISTE
+      // ---------------------------------------------------------
+      // 🕵️‍♂️ EL FLUJO DEL CHATBOT DE PRE-CALIFICACIÓN
+      // ---------------------------------------------------------
+
+      // Buscamos las configuraciones de los textos en la base de datos
+      const botSettingsDB = await sql`SELECT * FROM bot_settings LIMIT 1`;
+      const botConfig = botSettingsDB[0] || {
+          greeting_menu: "¡Hola! Bienvenido a Electrodomésticos Jared. Por favor, elige una opción:\n1️⃣ Comprar / Ventas\n2️⃣ Soporte Técnico\n3️⃣ Envíos",
+          opt1_reply: "Has elegido Ventas.",
+          opt2_reply: "Has elegido Soporte.",
+          opt3_reply: "Has elegido Envíos.",
+          opt4_reply: "Conectando con un asesor..."
+      };
+
+      let state = botStates[contactId] || { step: 'inicio' };
+      let respuestaBot = null;
+      let transferirAAsesor = false;
+
+      // EL CLIENTE ESTÁ EN EL MENÚ PRINCIPAL
+      if (state.step === 'inicio') {
+          if (text === '1') {
+              respuestaBot = "¡Excelente! Para brindarte una mejor atención y agilizar tu cotización, ¿me podrías indicar tu *Nombre Completo*?";
+              botStates[contactId] = { step: 'pidiendo_nombre' };
+          } else if (text === '2') {
+              respuestaBot = botConfig.opt2_reply;
+              transferirAAsesor = true;
+          } else if (text === '3') {
+              respuestaBot = botConfig.opt3_reply;
+              transferirAAsesor = true;
+          } else if (text === '4') {
+              respuestaBot = botConfig.opt4_reply;
+              transferirAAsesor = true;
+          } else {
+              // Si no eligió un número, le enviamos el menú de bienvenida
+              respuestaBot = botConfig.greeting_menu;
+          }
+      } 
+      // EL CLIENTE ESTÁ ESCRIBIENDO SU NOMBRE
+      else if (state.step === 'pidiendo_nombre') {
+          botStates[contactId].nombreCliente = text; // Guardamos el nombre en la memoria temporal
+          respuestaBot = `Perfecto ${text}, ¿y cuál es tu *DNI o RUC*?`;
+          botStates[contactId].step = 'pidiendo_dni';
+      }
+      // EL CLIENTE ESTÁ ESCRIBIENDO SU DNI
+      else if (state.step === 'pidiendo_dni') {
+          const nombreGuardado = botStates[contactId].nombreCliente;
+          const dniGuardado = text;
+          
+          respuestaBot = `¡Gracias, ${nombreGuardado}! He registrado tu DNI (${dniGuardado}). Te estoy transfiriendo con uno de nuestros asesores de ventas para que te ayude con tu compra. 👨‍💻`;
+          
+          // ACTUALIZAMOS LA BASE DE DATOS (Ficha CRM) CON LOS DATOS OBTENIDOS
+          await sql`
+             UPDATE contacts 
+             SET full_name = ${nombreGuardado}, document_id = ${dniGuardado} 
+             WHERE id = ${contactId}
+          `;
+          
+          // Avisamos al frontend que los datos cambiaron para que actualice el Panel Derecho
+          io.emit('contact-info-updated', { 
+             chatId: contactId, 
+             fullName: nombreGuardado, 
+             documentId: dniGuardado 
+          });
+
+          transferirAAsesor = true;
+          delete botStates[contactId]; // Limpiamos la memoria porque ya terminó el flujo
+      }
+
+      // ---------------------------------------------------------
+      // 🎰 ASIGNACIÓN DE AGENTES (ROUND-ROBIN)
+      // ---------------------------------------------------------
       let clienteExistente = await sql`SELECT assigned_to FROM contacts WHERE id = ${contactId}`;
       let asesorAsignado = null;
 
       if (clienteExistente.length > 0 && clienteExistente[0].assigned_to) {
-          // El cliente ya es antiguo, se queda con el asesor que ya tenía
           asesorAsignado = clienteExistente[0].assigned_to;
-      } else {
-          // 2. ¡ES UN CLIENTE NUEVO! A REPARTIR (ROUND-ROBIN)
+      } else if (transferirAAsesor) {
+          // Solo lanzamos la ruleta si el bot ya lo transfirió o no tiene dueño
           let asesores = await sql`SELECT username FROM users WHERE role = 'Agente' ORDER BY id ASC`;
-
           if (asesores.length > 0) {
-              // Le damos el cliente al asesor que le toca el turno
               asesorAsignado = asesores[turnoActualIndex].username;
-              console.log(`🎰 ¡Nuevo Lead! Asignado automáticamente a: ${asesorAsignado}`);
-
-              // Movemos la ruleta para el siguiente turno
               turnoActualIndex++;
-              
-              // Si la ruleta llegó al último asesor, la reiniciamos al primero
-              if (turnoActualIndex >= asesores.length) {
-                  turnoActualIndex = 0; 
-              }
+              if (turnoActualIndex >= asesores.length) turnoActualIndex = 0; 
+              io.emit('agent-assigned', { chatId: contactId, agentName: asesorAsignado });
           }
       }
 
-      // 3. GUARDAR EL CLIENTE CON SU ASESOR ASIGNADO
+      // GUARDAMOS AL CLIENTE Y EL MENSAJE ENTRANTE
       await sql`
         INSERT INTO contacts (id, name, last_message, updated_at, assigned_to) 
         VALUES (${contactId}, ${pushName}, ${text}, NOW(), ${asesorAsignado}) 
@@ -119,7 +174,6 @@ app.post("/webhook", async (req, res) => {
         SET last_message = ${text}, updated_at = NOW()
       `; 
       
-      // 4. GUARDAR EL MENSAJE EN EL HISTORIAL
       await sql`
         INSERT INTO messages (id, contact_id, body, is_mine, timestamp, ack) 
         VALUES (${messageId}, ${contactId}, ${text}, false, NOW(), 1) 
@@ -127,6 +181,18 @@ app.post("/webhook", async (req, res) => {
       `; 
       
       io.emit('whatsapp-message', { id: messageId, from: contactId, contactName: pushName, summaryText: text, body: text, mediaUrl: null, mimeType: null, ack: 1, timestamp: new Date(), isMine: false }); 
+
+      // 🤖 SI EL BOT TIENE ALGO QUE DECIR, LO ENVÍA
+      if (respuestaBot) {
+          await sendOfficialMessage(contactId, respuestaBot);
+          const botMessageId = "bot_" + Date.now();
+          await sql`
+            INSERT INTO messages (id, contact_id, body, is_mine, timestamp, ack, agent_name) 
+            VALUES (${botMessageId}, ${contactId}, ${respuestaBot}, true, NOW(), 1, 'Chatbot')
+          `;
+          io.emit('whatsapp-message', { id: botMessageId, from: contactId, body: respuestaBot, timestamp: new Date(), isMine: true, agentName: 'Chatbot' });
+      }
+
     }
   } catch (error) {
     console.error("Error procesando Webhook:", error); 
@@ -250,45 +316,22 @@ io.on('connection', (socket) => {
     // 🌟 EVENTO: Asignación Manual de Agentes
     socket.on('assign-agent', async (data) => {
         try {
-            const agentToAssign = data.agentName === "" ? null : data.agentName; // Maneja la opción "Nadie"
-            
-            // 1. Guardar en la Base de Datos
-            await sql`
-                UPDATE contacts 
-                SET assigned_to = ${agentToAssign} 
-                WHERE id = ${data.chatId}
-            `;
-            
-            // 2. Avisarle a todos los usuarios conectados (Frontend) para que la UI se actualice en vivo
-            io.emit('agent-assigned', { 
-                chatId: data.chatId, 
-                agentName: agentToAssign 
-            });
-            
+            const agentToAssign = data.agentName === "" ? null : data.agentName;
+            await sql`UPDATE contacts SET assigned_to = ${agentToAssign} WHERE id = ${data.chatId}`;
+            io.emit('agent-assigned', { chatId: data.chatId, agentName: agentToAssign });
             console.log(`👤 Reasignación manual: Chat ${data.chatId} asignado a ${agentToAssign || 'Bandeja Global'}`);
         } catch (error) {
             console.error("❌ Error al asignar agente:", error);
         }
     });
 
-    // 🌟 NUEVO EVENTO: Obtener el directorio completo de clientes
+    // 🌟 EVENTO: Obtener el directorio completo de clientes
     socket.on('get-all-contacts', async () => {
         try {
-            // Hacemos un SELECT de todos los clientes, ordenados por fecha de actualización
             const allContacts = await sql`
-                SELECT 
-                    id, 
-                    name, 
-                    full_name, 
-                    document_id, 
-                    customer_type, 
-                    label, 
-                    TO_CHAR(updated_at, 'DD/MM/YYYY HH24:MI') as last_seen 
-                FROM contacts 
-                ORDER BY updated_at DESC
+                SELECT id, name, full_name, document_id, customer_type, label, TO_CHAR(updated_at, 'DD/MM/YYYY HH24:MI') as last_seen 
+                FROM contacts ORDER BY updated_at DESC
             `;
-            
-            // Le enviamos la base de datos completa de vuelta al frontend
             socket.emit('load-all-contacts', allContacts);
         } catch (error) {
             console.error("❌ Error obteniendo directorio:", error);
